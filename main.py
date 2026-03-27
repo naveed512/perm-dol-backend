@@ -265,15 +265,42 @@ def scrape_xlsx():
             "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs/PERM_Disclosure_Data_FY2026_Q1.xlsx",
             "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs/PERM_Disclosure_Data_FY2025_Q4.xlsx",
         ]
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
         wb = None
         for url in urls:
             try:
                 log("info", f"Downloading: {url.split('/')[-1]}")
-                r = requests.get(url, headers=headers, timeout=60, stream=True)
+                # Use session with realistic browser headers
+                session = requests.Session()
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                })
+                # First visit dol.gov to get cookies
+                session.get("https://www.dol.gov/agencies/eta/foreign-labor/performance", timeout=15)
+                # Now download the file
+                r = session.get(url, timeout=120, stream=True,
+                    headers={
+                        'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*',
+                        'Referer': 'https://www.dol.gov/agencies/eta/foreign-labor/performance',
+                    })
+                log("info", f"Status: {r.status_code}, Content-Type: {r.headers.get('content-type','?')}")
                 if r.status_code == 200:
-                    wb = openpyxl.load_workbook(BytesIO(r.content), read_only=True, data_only=True)
+                    content_bytes = r.content
+                    log("info", f"Downloaded: {len(content_bytes):,} bytes")
+                    if len(content_bytes) < 5000:
+                        log("error", f"File too small ({len(content_bytes)} bytes) — likely HTML error page")
+                        continue
+                    content = BytesIO(content_bytes)
+                    wb = openpyxl.load_workbook(content, read_only=True, data_only=True)
+                    log("info", f"XLSX opened successfully")
                     break
+                else:
+                    log("error", f"HTTP {r.status_code} for {url.split('/')[-1]}")
             except Exception as e:
                 log("error", f"Download failed: {e}")
                 continue
