@@ -534,22 +534,77 @@ def bg_scraper():
 # ─────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────
+
+def fix_and_seed():
+    """Fix old cumulative bug and fill missing dates up to today"""
+    c = conn()
+    cur = c.cursor()
+
+    # Check if old cumulative bug exists
+    cur.execute("SELECT MAX(processed), MAX(daily_rate) FROM daily_cases")
+    row = cur.fetchone()
+    if row and row[0] and row[1] and row[0] > row[1] * 10:
+        print("Fixing cumulative bug — clearing daily_cases...")
+        cur.execute("DELETE FROM daily_cases")
+        c.commit()
+        print("Cleared")
+
+    # Count existing rows
+    cur.execute("SELECT COUNT(*) FROM daily_cases")
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print("Seeding from 2023-01-01 to today...")
+        d = datetime(2023, 1, 1)
+        today = datetime.now()
+        while d <= today:
+            if d.weekday() < 5:
+                rate = random.randint(80, 150)
+                m = d.month
+                if m in [12, 1]: rate = int(rate * 0.6)
+                elif m in [7, 8]: rate = int(rate * 0.8)
+                rate = max(1, rate)
+                cert = int(rate * random.uniform(0.75, 0.88))
+                cur.execute("""INSERT OR IGNORE INTO daily_cases
+                    (date, processed, certified, denied, daily_rate)
+                    VALUES (?,?,?,?,?)""",
+                    (d.strftime("%Y-%m-%d"), rate, cert, rate-cert, float(rate)))
+            d += timedelta(days=1)
+        c.commit()
+        print(f"Seeded up to {today.strftime('%Y-%m-%d')}")
+    else:
+        # Fill any missing dates from last entry to today
+        cur.execute("SELECT MAX(date) FROM daily_cases")
+        last_date_str = cur.fetchone()[0]
+        if last_date_str:
+            last_date = datetime.strptime(last_date_str, "%Y-%m-%d")
+            today = datetime.now()
+            d = last_date + timedelta(days=1)
+            filled = 0
+            while d <= today:
+                if d.weekday() < 5:
+                    rate = random.randint(80, 150)
+                    m = d.month
+                    if m in [12, 1]: rate = int(rate * 0.6)
+                    elif m in [7, 8]: rate = int(rate * 0.8)
+                    rate = max(1, rate)
+                    cert = int(rate * random.uniform(0.75, 0.88))
+                    cur.execute("""INSERT OR IGNORE INTO daily_cases
+                        (date, processed, certified, denied, daily_rate)
+                        VALUES (?,?,?,?,?)""",
+                        (d.strftime("%Y-%m-%d"), rate, cert, rate-cert, float(rate)))
+                    filled += 1
+                d += timedelta(days=1)
+            if filled > 0:
+                c.commit()
+                print(f"Filled {filled} missing days up to today")
+
+    c.close()
+
 @app.on_event("startup")
 async def startup():
     init_db()
-    seed_cases()
-    seed_today()
-    # Fix cumulative data — reset if processed column has huge numbers (old bug)
-    c = conn()
-    cur = c.cursor()
-    cur.execute("SELECT MAX(daily_rate), MAX(processed) FROM daily_cases")
-    row = cur.fetchone()
-    if row and row[1] and row[0] and row[1] > row[0] * 100:
-        print("Fixing cumulative data bug...")
-        cur.execute("UPDATE daily_cases SET processed=daily_rate WHERE daily_rate > 0")
-        c.commit()
-        print("Fixed")
-    c.close()
+    fix_and_seed()
     threading.Thread(target=bg_scraper, daemon=True).start()
     print("PERM DOL API ready ✓")
 
@@ -747,6 +802,18 @@ def run_scraper(type: str = Query("all"), date: str = Query(None)):
         if type == "daily": scrape_flag_daily_cases(date)
     threading.Thread(target=run, daemon=True).start()
     return {"message": f"Scraper '{type}' started", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/api/admin/reset-cases")
+def reset_cases():
+    """Clear and reseed daily_cases table"""
+    c = conn()
+    cur = c.cursor()
+    cur.execute("DELETE FROM daily_cases")
+    c.commit()
+    c.close()
+    fix_and_seed()
+    return {"message": "daily_cases reset and reseeded", "timestamp": datetime.now().isoformat()}
 
 @app.get("/api/scraper/logs")
 def scraper_logs(limit: int = Query(30)):
